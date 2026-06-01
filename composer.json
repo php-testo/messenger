@@ -1,0 +1,45 @@
+{
+    "name": "testo/messenger",
+    "description": "Output capturing and channel messaging plugin for the Testo testing framework.",
+    "license": "BSD-3-Clause",
+    "type": "library",
+    "keywords": [
+        "testo",
+        "output",
+        "messenger",
+        "logger"
+    ],
+    "authors": [
+        {
+            "name": "Aleksei Gagarin (roxblnfk)",
+            "homepage": "https://github.com/roxblnfk"
+        }
+    ],
+    "funding": [
+        {
+            "type": "boosty",
+            "url": "https://boosty.to/roxblnfk"
+        }
+    ],
+    "require": {
+        "php": ">=8.2",
+        "psr/event-dispatcher": "^1.0",
+        "psr/log": "^2.0 || ^3.0",
+        "testo/testo": "*"
+    },
+    "autoload": {
+        "psr-4": {
+            "Testo\\Messenger\\": "src/"
+        },
+        "files": [
+            "Messenger.php"
+        ]
+    },
+    "minimum-stability": "dev",
+    "prefer-stable": true,
+    "extra": {
+        "branch-alias": {
+            "dev-1.x": "1.x-dev"
+        }
+    }
+}
