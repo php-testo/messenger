@@ -8,7 +8,6 @@ use Psr\EventDispatcher\EventDispatcherInterface;
 use Testo\Core\Log\Level;
 use Testo\Core\Log\Message;
 use Testo\Core\Log\MessageLog;
-use Testo\Event\Message\MessageReceived;
 use Testo\Messenger;
 use Testo\Messenger\Channel;
 
@@ -28,30 +27,15 @@ final class MessengerHub implements Messenger
     public function __construct(
         private readonly EventDispatcherInterface $eventDispatcher,
     ) {
-        $this->state = new State();
+        $this->state = new State($this->eventDispatcher);
     }
 
     #[\Override]
     public function log(string $channel, string $content, Level $level = Level::Info, array $context = []): void
     {
-        $state = $this->state;
-
-        // Avalanche guard: a listener that emits output during dispatch would be re-captured and
-        // dispatched again, recursing forever. The flag lives on the State, so scope()'s state swap
-        // keeps it fiber-local — other fibers running while this dispatch is suspended capture normally.
-        if ($state->isSuspended()) {
-            return;
-        }
-
-        $message = new Message(\microtime(true), $channel, $level, $content, $context);
-        $state->push($message);
-
-        $state->suspend();
-        try {
-            $this->eventDispatcher->dispatch(new MessageReceived($message));
-        } finally {
-            $state->resume();
-        }
+        // The active state records the message and announces it (or holds the event, in a holdEvents
+        // fork, until commit); it also guards against avalanche recursion during dispatch.
+        $this->state->record(new Message(\microtime(true), $channel, $level, $content, $context));
     }
 
     #[\Override]
@@ -64,7 +48,7 @@ final class MessengerHub implements Messenger
     public function scope(\Closure $scope): mixed
     {
         $old = $this->state;
-        $new = $old->fork();
+        $new = new State($this->eventDispatcher);
         try {
             $this->state = $new;
             if (\Fiber::getCurrent() === null) {
@@ -93,6 +77,43 @@ final class MessengerHub implements Messenger
         } finally {
             $this->state = $old;
             $new->destroy();
+        }
+    }
+
+    #[\Override]
+    public function fork(\Closure $fork, bool $holdEvents = false): mixed
+    {
+        $old = $this->state;
+        $new = $old->fork($holdEvents);
+        try {
+            $this->state = $new;
+            if (\Fiber::getCurrent() === null) {
+                return $fork($new->commit(...));
+            }
+
+            // Wrap the fork into a fiber so the parent state is restored across suspensions.
+            $fiber = new \Fiber(static fn() => $fork($new->commit(...)));
+            $value = $fiber->start();
+            while (!$fiber->isTerminated()) {
+                $this->state = $old;
+                try {
+                    $resume = \Fiber::suspend($value);
+                } catch (\Throwable $e) {
+                    $this->state = $new;
+                    $value = $fiber->throw($e);
+                    continue;
+                }
+
+                $this->state = $new;
+                $value = $fiber->resume($resume);
+            }
+
+            return $fiber->getReturn();
+        } finally {
+            // Restore the parent, but do NOT destroy the fork: the `$commit` callable may be invoked
+            // after this returns (the caller decides to keep/drop the branch only once it sees the
+            // result). commit() clears the fork's own buffer; an abandoned fork is freed by GC.
+            $this->state = $old;
         }
     }
 

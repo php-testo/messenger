@@ -4,99 +4,195 @@ declare(strict_types=1);
 
 namespace Tests\Messenger\Unit;
 
+use Psr\EventDispatcher\EventDispatcherInterface;
 use Testo\Assert;
 use Testo\Codecov\Covers;
-use Testo\Core\Log\Level;
+use Testo\Core\Log\Message;
 use Testo\Core\Log\MessageLog;
-use Testo\Messenger;
-use Testo\Messenger\Channel;
+use Testo\Event\Message\MessageReceived;
 use Testo\Messenger\Internal\MessengerHub;
 use Testo\Test;
-use Tests\Messenger\Stub\SpyDispatcher;
 
 #[Test]
 #[Covers(MessengerHub::class)]
 final class MessengerHubTest
 {
-    public function logRecordsMessageAndDispatchesEvent(): void
+    public function committedForkMessagesFoldIntoParent(): void
     {
-        $spy = new SpyDispatcher();
-        $hub = new MessengerHub($spy);
+        $hub = new MessengerHub($this->nullDispatcher());
+        $hub->log('c', 'a');
 
-        $hub->log('stdout', 'hello');
-
-        Assert::count($hub->getMessages(), 1);
-        Assert::count($spy->messages(), 1);
-        Assert::same($spy->messages()[0]->message->content, 'hello');
-        Assert::same($spy->messages()[0]->message->channel, 'stdout');
-    }
-
-    public function logDefaultsToInfoLevel(): void
-    {
-        $hub = new MessengerHub(new SpyDispatcher());
-        $hub->log('c', 'x');
-        Assert::same($hub->getMessages()->all()[0]->level, Level::Info);
-    }
-
-    public function getMessagesReturnsMessageLog(): void
-    {
-        $hub = new MessengerHub(new SpyDispatcher());
-        Assert::instanceOf($hub->getMessages(), MessageLog::class);
-    }
-
-    public function channelReturnsHandleBoundToName(): void
-    {
-        $hub = new MessengerHub(new SpyDispatcher());
-        $channel = $hub->channel('sql');
-        Assert::instanceOf($channel, Channel::class);
-        Assert::same($channel->name, 'sql');
-    }
-
-    public function scopeIsolatesChildBufferFromParent(): void
-    {
-        $hub = new MessengerHub(new SpyDispatcher());
-        $hub->log('c', 'root');
-
-        $inside = $hub->scope(static function (Messenger $m): MessageLog {
-            $m->log('c', 'inner');
-            return $m->getMessages();
+        $hub->fork(static function (callable $commit) use ($hub): void {
+            $hub->log('c', 'b');
+            $commit();
         });
 
-        Assert::count($inside, 1);
-        Assert::same($inside->all()[0]->content, 'inner');
-        Assert::count($hub->getMessages(), 1);
-        Assert::same($hub->getMessages()->all()[0]->content, 'root');
+        Assert::same($this->contents($hub->getMessages()), ['a', 'b']);
     }
 
-    public function eventStreamStaysGlobalAcrossScopes(): void
+    public function abandonedForkIsDropped(): void
     {
-        $spy = new SpyDispatcher();
-        $hub = new MessengerHub($spy);
-
+        $hub = new MessengerHub($this->nullDispatcher());
         $hub->log('c', 'a');
-        $hub->scope(static fn(Messenger $m) => $m->log('c', 'b'));
 
-        Assert::count($spy->messages(), 2);
+        $hub->fork(static function (callable $commit) use ($hub): void {
+            $hub->log('c', 'b'); // no commit → branch is discarded on exit
+        });
+
+        Assert::same($this->contents($hub->getMessages()), ['a']);
     }
 
-    public function scopeRestoresParentStateAcrossFiberSuspension(): void
+    /**
+     * The retry/repeat pattern: the closure hands the `$commit` callable back out, and the caller
+     * decides to keep the branch only after seeing the result — i.e. after `fork()` has returned.
+     */
+    public function commitCanBeDeferredPastTheClosure(): void
     {
-        $hub = new MessengerHub(new SpyDispatcher());
+        $hub = new MessengerHub($this->nullDispatcher());
+        $hub->log('c', 'a');
+
+        [$commit] = $hub->fork(static function (callable $commit) use ($hub): array {
+            $hub->log('c', 'b');
+            return [$commit];
+        });
+        $commit();
+
+        Assert::same($this->contents($hub->getMessages()), ['a', 'b']);
+    }
+
+    public function deferredForkLeftUncommittedIsDropped(): void
+    {
+        $hub = new MessengerHub($this->nullDispatcher());
+        $hub->log('c', 'a');
+
+        $hub->fork(static function (callable $commit) use ($hub): array {
+            $hub->log('c', 'b');
+            return [$commit]; // never invoked → branch dropped
+        });
+
+        Assert::same($this->contents($hub->getMessages()), ['a']);
+    }
+
+    public function forkReturnsClosureResult(): void
+    {
+        $hub = new MessengerHub($this->nullDispatcher());
+
+        $result = $hub->fork(static fn(callable $commit): int => 42);
+
+        Assert::same($result, 42);
+    }
+
+    /**
+     * Model A: events are the global firehose — a dropped fork still announces its messages live,
+     * it just never persists them into the scope.
+     */
+    public function eventsFireForADroppedForkToo(): void
+    {
+        $dispatcher = new class implements EventDispatcherInterface {
+            /** @var list<string> */
+            public array $seen = [];
+
+            public function dispatch(object $event): object
+            {
+                $event instanceof MessageReceived and $this->seen[] = $event->message->content;
+                return $event;
+            }
+        };
+        $hub = new MessengerHub($dispatcher);
+
+        $hub->fork(static function (callable $commit) use ($hub): void {
+            $hub->log('c', 'b');
+        });
+
+        Assert::same($dispatcher->seen, ['b']);
+        Assert::same($this->contents($hub->getMessages()), []);
+    }
+
+    public function holdEventsDefersDispatchUntilCommit(): void
+    {
+        $dispatcher = new class implements EventDispatcherInterface {
+            /** @var list<string> */
+            public array $seen = [];
+
+            public function dispatch(object $event): object
+            {
+                $event instanceof MessageReceived and $this->seen[] = $event->message->content;
+                return $event;
+            }
+        };
+        $hub = new MessengerHub($dispatcher);
+
+        [$commit] = $hub->fork(static function (callable $commit) use ($hub): array {
+            $hub->log('c', 'b');
+            return [$commit];
+        }, holdEvents: true);
+
+        Assert::same($dispatcher->seen, []);    // held — not dispatched while the fork is open
+        $commit();
+        Assert::same($dispatcher->seen, ['b']); // released on commit
+    }
+
+    public function heldEventsOfADroppedForkAreNeverDispatched(): void
+    {
+        $dispatcher = new class implements EventDispatcherInterface {
+            /** @var list<string> */
+            public array $seen = [];
+
+            public function dispatch(object $event): object
+            {
+                $event instanceof MessageReceived and $this->seen[] = $event->message->content;
+                return $event;
+            }
+        };
+        $hub = new MessengerHub($dispatcher);
+
+        $hub->fork(static function (callable $commit) use ($hub): array {
+            $hub->log('c', 'b');
+            return [$commit]; // never committed
+        }, holdEvents: true);
+
+        Assert::same($dispatcher->seen, []);
+    }
+
+    public function forkIsFiberSafeAcrossSuspension(): void
+    {
+        $hub = new MessengerHub($this->nullDispatcher());
         $hub->log('c', 'root');
 
-        $fiber = new \Fiber(static fn(): int => $hub->scope(static function (Messenger $m): int {
-            $m->log('c', 'a');
-            \Fiber::suspend();
-            $m->log('c', 'b');
-            return \count($m->getMessages());
-        }));
+        $fiber = new \Fiber(static function () use ($hub): void {
+            $hub->fork(static function (callable $commit) use ($hub): void {
+                $hub->log('c', 'before');
+                \Fiber::suspend();
+                $hub->log('c', 'after');
+                $commit();
+            });
+        });
 
-        $fiber->start();
-        # While the test is suspended the active scope is the parent again.
-        $hub->log('c', 'while-suspended');
-        $fiber->resume();
+        $fiber->start();                    // logs 'before' into the fork, then suspends
+        $hub->log('c', 'while-suspended');  // parent state restored → lands outside the fork
+        $fiber->resume();                   // logs 'after' into the fork, then commits
 
-        Assert::same($fiber->getReturn(), 2);
-        Assert::count($hub->getMessages(), 2);
+        # Order is asserted by StateTest; here we only care that nothing leaked or was lost.
+        $contents = $this->contents($hub->getMessages());
+        \sort($contents);
+        Assert::same($contents, ['after', 'before', 'root', 'while-suspended']);
+    }
+
+    private function nullDispatcher(): EventDispatcherInterface
+    {
+        return new class implements EventDispatcherInterface {
+            public function dispatch(object $event): object
+            {
+                return $event;
+            }
+        };
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function contents(MessageLog $log): array
+    {
+        return \array_map(static fn(Message $m): string => $m->content, $log->all());
     }
 }

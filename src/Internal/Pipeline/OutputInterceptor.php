@@ -31,9 +31,12 @@ final readonly class OutputInterceptor implements TestRunInterceptor
 {
     /**
      * Greater than {@see InterceptorOptions::ORDER_DATA_PROVIDER} (per data set) and less than
-     * {@see InterceptorOptions::ORDER_DEFAULT} (wraps assertions and the test body).
+     * {@see InterceptorOptions::ORDER_DEFAULT}, so the scope is the outermost per-test wrapper:
+     * it encloses every other interceptor (assertions, expectations, …) and the test body, and
+     * therefore captures output produced by any of them — including the assertion history other
+     * plugins write into a channel after the test returns.
      */
-    private const ORDER = PHP_INT_MAX;
+    private const ORDER = InterceptorOptions::ORDER_DATA_PROVIDER + 1;
 
     public function __construct(
         private Messenger $messenger,

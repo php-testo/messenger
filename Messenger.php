@@ -17,8 +17,10 @@ use Testo\Messenger\Channel;
  * messages into named channels through this service. Every write is recorded into the active
  * scope's buffer and announced via a {@see MessageReceived} event.
  *
- * Forked per suite / case / test via {@see scope()}: each scope owns an isolated message buffer
- * while the {@see MessageReceived} event stream stays global.
+ * Buffers are nested per suite / case / test via {@see scope()} — an isolated child that is
+ * dropped on exit — while the {@see MessageReceived} event stream stays global. {@see fork()}
+ * adds a *mergeable* branch on top of the active scope: its messages fold into the parent only
+ * if committed, so a repeated or retried execution can keep one attempt and drop the rest.
  *
  * This interface is meant to be **consumed, not implemented** by userland code: inject or
  * type-hint it to talk to the messenger. The implementation is provided by the framework
@@ -60,6 +62,30 @@ interface Messenger
      * @return T
      */
     public function scope(\Closure $scope): mixed;
+
+    /**
+     * Run the given closure within a fork: a mergeable child branch of the active scope.
+     *
+     * Messages logged while the fork is active accumulate in an isolated child buffer. The closure
+     * receives a `$commit` callable that folds the branch's messages into the parent scope; if it is
+     * never called, the branch's messages are discarded. `$commit` may be invoked inside the closure
+     * or kept and called later — a retried/repeated execution decides whether to keep an attempt only
+     * after seeing its result. The active state is restored once the closure returns. Fiber-aware:
+     * the parent state is restored across suspension points.
+     *
+     * Lets a repeated/retried execution stay tentative — commit the attempt whose output should
+     * survive, drop the rest — so {@see getMessages()} doesn't accumulate every attempt.
+     *
+     * With `$holdEvents`, the {@see MessageReceived} events of messages logged inside the fork are
+     * buffered instead of dispatched live, and released only on commit (discarded if the fork is
+     * dropped). Use it so a discarded attempt stays invisible in real-time consumers too, not just
+     * absent from {@see getMessages()}.
+     *
+     * @template T
+     * @param \Closure(callable(): void): T $fork Receives the `$commit` callable.
+     * @return T
+     */
+    public function fork(\Closure $fork, bool $holdEvents = false): mixed;
 
     /**
      * Messages recorded in the active scope.

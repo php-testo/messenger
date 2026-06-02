@@ -23,6 +23,7 @@
     ],
     "require": {
         "php": ">=8.2",
+        "internal/destroy": "^1.0",
         "psr/event-dispatcher": "^1.0",
         "psr/log": "^2.0 || ^3.0",
         "testo/testo": "*"
