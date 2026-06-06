@@ -11,7 +11,7 @@ use Testo\Messenger\Internal\Pipeline\OutputInterceptor;
 use Testo\Messenger\MessengerPlugin;
 use Testo\Test;
 use Testo\Testing\Attribute\TestingSuite;
-use Testo\Testing\Traits\TestRunner;
+use Testo\Testing\Helper\TestRunner;
 use Tests\Messenger\Stub\OutputStub;
 
 /**

@@ -8,7 +8,7 @@ use Testo\Assert;
 use Testo\Test;
 
 /**
- * Stub case run through the real pipeline (via {@see \Testo\Testing\Traits\TestRunner}) to verify
+ * Stub case run through the real pipeline (via {@see \Testo\Testing\Helper\TestRunner}) to verify
  * that {@see \Testo\Messenger\Internal\Pipeline\OutputInterceptor} captures native output into the
  * test's {@see \Testo\Core\Context\TestResult}.
  */
